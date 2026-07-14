@@ -1,0 +1,201 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "2.0.0.0",
+  "parameters": {},
+  "triggers": {
+    "Recurrence_poll": {
+      "type": "Recurrence",
+      "recurrence": { "frequency": "Minute", "interval": 2 }
+    }
+  },
+  "actions": {
+    "Get_unread_messages": {
+      "type": "Http",
+      "runAfter": {},
+      "inputs": {
+        "method": "GET",
+        "uri": "https://graph.microsoft.com/v1.0/users/__SVC_MAILBOX__/mailFolders/Inbox/messages?$filter=isRead eq false&$select=id,from,subject&$top=25",
+        "authentication": { "type": "ManagedServiceIdentity", "audience": "https://graph.microsoft.com" }
+      }
+    },
+    "For_each_message": {
+      "type": "Foreach",
+      "foreach": "@body('Get_unread_messages')?['value']",
+      "runAfter": { "Get_unread_messages": ["Succeeded"] },
+      "runtimeConfiguration": { "concurrency": { "repetitions": 1 } },
+      "actions": {
+        "Set_nowStamp": {
+          "type": "Compose",
+          "runAfter": {},
+          "inputs": "@utcNow()"
+        },
+        "Set_senderEmail": {
+          "type": "Compose",
+          "runAfter": { "Set_nowStamp": ["Succeeded"] },
+          "inputs": "@toLower(coalesce(items('For_each_message')?['from']?['emailAddress']?['address'], ''))"
+        },
+        "Set_senderDomain": {
+          "type": "Compose",
+          "runAfter": { "Set_senderEmail": ["Succeeded"] },
+          "inputs": "@if(contains(outputs('Set_senderEmail'), '@'), last(split(outputs('Set_senderEmail'), '@')), '')"
+        },
+        "Set_hourBucket": {
+          "type": "Compose",
+          "runAfter": { "Set_senderDomain": ["Succeeded"] },
+          "inputs": "@formatDateTime(outputs('Set_nowStamp'), 'yyyyMMddHH')"
+        },
+        "Guards_antiloop": {
+          "type": "If",
+          "runAfter": { "Set_hourBucket": ["Succeeded"] },
+          "expression": {
+            "and": [
+              { "not": { "equals": ["@outputs('Set_senderDomain')", ""] } },
+              { "not": { "contains": ["@outputs('Set_senderEmail')", "mailer-daemon"] } },
+              { "not": { "contains": ["@outputs('Set_senderEmail')", "postmaster"] } },
+              { "not": { "contains": ["@outputs('Set_senderEmail')", "no-reply"] } },
+              { "not": { "contains": ["@outputs('Set_senderEmail')", "noreply"] } },
+              { "not": { "equals": ["@outputs('Set_senderDomain')", "__SELF_DOMAIN__"] } }
+            ]
+          },
+          "actions": {
+            "Get_registry": {
+              "type": "Http",
+              "runAfter": {},
+              "inputs": {
+                "method": "GET",
+                "uri": "https://__STORAGE__.table.core.windows.net/NotifyLog()?$filter=RowKey eq '@{outputs('Set_senderDomain')}'",
+                "headers": { "Accept": "application/json;odata=nometadata", "x-ms-version": "2019-02-02" },
+                "authentication": { "type": "ManagedServiceIdentity", "audience": "https://storage.azure.com" }
+              }
+            },
+            "Query_denylist": {
+              "type": "Http",
+              "runAfter": { "Get_registry": ["Succeeded"] },
+              "inputs": {
+                "method": "GET",
+                "uri": "https://__STORAGE__.table.core.windows.net/Denylist()?$filter=RowKey eq '@{outputs('Set_senderDomain')}'",
+                "headers": { "Accept": "application/json;odata=nometadata", "x-ms-version": "2019-02-02" },
+                "authentication": { "type": "ManagedServiceIdentity", "audience": "https://storage.azure.com" }
+              }
+            },
+            "Get_counter": {
+              "type": "Http",
+              "runAfter": { "Query_denylist": ["Succeeded"] },
+              "inputs": {
+                "method": "GET",
+                "uri": "https://__STORAGE__.table.core.windows.net/Counters()?$filter=RowKey eq '@{outputs('Set_hourBucket')}'",
+                "headers": { "Accept": "application/json;odata=nometadata", "x-ms-version": "2019-02-02" },
+                "authentication": { "type": "ManagedServiceIdentity", "audience": "https://storage.azure.com" }
+              }
+            },
+            "Set_prevFirstSeen": {
+              "type": "Compose",
+              "runAfter": { "Get_counter": ["Succeeded"] },
+              "inputs": "@coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['FirstSeenUtc'], outputs('Set_nowStamp'))"
+            },
+            "Set_prevCount": {
+              "type": "Compose",
+              "runAfter": { "Set_prevFirstSeen": ["Succeeded"] },
+              "inputs": "@int(coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['DetectionCount'], 0))"
+            },
+            "Set_prevFirstNotified": {
+              "type": "Compose",
+              "runAfter": { "Set_prevCount": ["Succeeded"] },
+              "inputs": "@coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['FirstNotifiedUtc'], '')"
+            },
+            "Set_prevLastNotified": {
+              "type": "Compose",
+              "runAfter": { "Set_prevFirstNotified": ["Succeeded"] },
+              "inputs": "@coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['LastNotifiedUtc'], '')"
+            },
+            "Set_hourCount": {
+              "type": "Compose",
+              "runAfter": { "Set_prevLastNotified": ["Succeeded"] },
+              "inputs": "@int(coalesce(first(coalesce(body('Get_counter')?['value'], json('[]')))?['Count'], 0))"
+            },
+            "Set_shouldNotify": {
+              "type": "Compose",
+              "runAfter": { "Set_hourCount": ["Succeeded"] },
+              "inputs": "@and(equals(length(coalesce(body('Query_denylist')?['value'], json('[]'))), 0), or(empty(outputs('Set_prevLastNotified')), less(outputs('Set_prevLastNotified'), addHours(outputs('Set_nowStamp'), -24))), less(outputs('Set_hourCount'), __HOURLY_CAP__))"
+            },
+            "If_shouldNotify": {
+              "type": "If",
+              "runAfter": { "Set_shouldNotify": ["Succeeded"] },
+              "expression": { "and": [ { "equals": ["@outputs('Set_shouldNotify')", true] } ] },
+              "actions": {
+                "Send_notification": {
+                  "type": "Http",
+                  "runAfter": {},
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "https://graph.microsoft.com/v1.0/users/__SEND_MAILBOX__/sendMail",
+                    "headers": { "Content-Type": "application/json" },
+                    "body": {
+                      "message": {
+                        "subject": "Votre message n'a pas pu etre authentifie (SPF/DKIM)",
+                        "body": {
+                          "contentType": "HTML",
+                          "content": "<p>Bonjour,</p><p>Nous avons bien recu votre message. Nos controles de securite indiquent que votre domaine d'envoi n'a pas passe les verifications d'authentification SPF et/ou DKIM. Votre message a bien ete remis, mais cette configuration expose vos echanges a l'usurpation d'identite.</p><p>Nous vous recommandons de verifier vos enregistrements SPF, DKIM et DMARC aupres de votre prestataire de messagerie.</p><p>Bien cordialement,<br/>L'equipe securite</p>"
+                        },
+                        "toRecipients": [ { "emailAddress": { "address": "@{outputs('Set_senderEmail')}" } } ]
+                      },
+                      "saveToSentItems": true
+                    },
+                    "authentication": { "type": "ManagedServiceIdentity", "audience": "https://graph.microsoft.com" }
+                  }
+                },
+                "Increment_counter": {
+                  "type": "Http",
+                  "runAfter": { "Send_notification": ["Succeeded"] },
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "https://__STORAGE__.table.core.windows.net/Counters(PartitionKey='hour',RowKey='@{outputs('Set_hourBucket')}')",
+                    "headers": { "Accept": "application/json;odata=nometadata", "Content-Type": "application/json", "x-ms-version": "2019-02-02" },
+                    "body": {
+                      "PartitionKey": "hour",
+                      "RowKey": "@{outputs('Set_hourBucket')}",
+                      "Count": "@add(outputs('Set_hourCount'), 1)"
+                    },
+                    "authentication": { "type": "ManagedServiceIdentity", "audience": "https://storage.azure.com" }
+                  }
+                }
+              },
+              "else": { "actions": {} }
+            },
+            "Upsert_registry": {
+              "type": "Http",
+              "runAfter": { "If_shouldNotify": ["Succeeded", "Skipped"] },
+              "inputs": {
+                "method": "PUT",
+                "uri": "https://__STORAGE__.table.core.windows.net/NotifyLog(PartitionKey='domain',RowKey='@{outputs('Set_senderDomain')}')",
+                "headers": { "Accept": "application/json;odata=nometadata", "Content-Type": "application/json", "x-ms-version": "2019-02-02" },
+                "body": {
+                  "PartitionKey": "domain",
+                  "RowKey": "@{outputs('Set_senderDomain')}",
+                  "FirstSeenUtc": "@{outputs('Set_prevFirstSeen')}",
+                  "LastSeenUtc": "@{outputs('Set_nowStamp')}",
+                  "DetectionCount": "@add(outputs('Set_prevCount'), 1)",
+                  "FirstNotifiedUtc": "@{if(and(outputs('Set_shouldNotify'), empty(outputs('Set_prevFirstNotified'))), outputs('Set_nowStamp'), outputs('Set_prevFirstNotified'))}",
+                  "LastNotifiedUtc": "@{if(outputs('Set_shouldNotify'), outputs('Set_nowStamp'), outputs('Set_prevLastNotified'))}"
+                },
+                "authentication": { "type": "ManagedServiceIdentity", "audience": "https://storage.azure.com" }
+              }
+            }
+          },
+          "else": { "actions": {} }
+        },
+        "Mark_read": {
+          "type": "Http",
+          "runAfter": { "Guards_antiloop": ["Succeeded", "Failed", "Skipped"] },
+          "inputs": {
+            "method": "PATCH",
+            "uri": "https://graph.microsoft.com/v1.0/users/__SVC_MAILBOX__/messages/@{items('For_each_message')?['id']}",
+            "headers": { "Content-Type": "application/json" },
+            "body": { "isRead": true },
+            "authentication": { "type": "ManagedServiceIdentity", "audience": "https://graph.microsoft.com" }
+          }
+        }
+      }
+    }
+  }
+}

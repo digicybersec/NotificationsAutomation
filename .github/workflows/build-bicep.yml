@@ -1,0 +1,32 @@
+name: Build ARM template
+
+# Recompile azuredeploy.json dès que le Bicep ou le workflow change,
+# pour que le bouton "Deploy to Azure" pointe toujours sur une version à jour.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'main.bicep'
+      - 'workflow.json'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compiler Bicep -> ARM
+        run: az bicep build --file main.bicep --outfile azuredeploy.json
+
+      - name: Commit si changement
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add azuredeploy.json
+          git diff --staged --quiet || git commit -m "chore: rebuild azuredeploy.json [skip ci]"
+          git push

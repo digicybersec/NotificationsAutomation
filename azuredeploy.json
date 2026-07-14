@@ -1,0 +1,195 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.45.6.27763",
+      "templateHash": "17924118387677237737"
+    }
+  },
+  "parameters": {
+    "prefix": {
+      "type": "string",
+      "defaultValue": "authfail",
+      "metadata": {
+        "description": "Nom court du projet, sert de préfixe aux ressources."
+      }
+    },
+    "svcMailbox": {
+      "type": "string",
+      "metadata": {
+        "description": "Boîte de service qui reçoit la copie BCC (lecture + mark read)."
+      }
+    },
+    "sendMailbox": {
+      "type": "string",
+      "defaultValue": "[parameters('svcMailbox')]",
+      "metadata": {
+        "description": "Boîte depuis laquelle part la notification (souvent = svcMailbox)."
+      }
+    },
+    "selfDomain": {
+      "type": "string",
+      "metadata": {
+        "description": "Domaine de tes boîtes internes, pour couper les boucles."
+      }
+    },
+    "hourlyCap": {
+      "type": "int",
+      "defaultValue": 50,
+      "metadata": {
+        "description": "Plafond de notifications par heure (coupe-circuit anti-backscatter). Au-dela, on enregistre mais on n'envoie plus."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "variables": {
+    "storageName": "[toLower(format('{0}{1}', parameters('prefix'), uniqueString(resourceGroup().id)))]",
+    "logicAppName": "[format('{0}-notify-logic', parameters('prefix'))]",
+    "lawName": "[format('{0}-law', parameters('prefix'))]",
+    "tableDataContributorRoleId": "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3",
+    "defText": "{\n  \"$schema\": \"https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#\",\n  \"contentVersion\": \"2.0.0.0\",\n  \"parameters\": {},\n  \"triggers\": {\n    \"Recurrence_poll\": {\n      \"type\": \"Recurrence\",\n      \"recurrence\": { \"frequency\": \"Minute\", \"interval\": 2 }\n    }\n  },\n  \"actions\": {\n    \"Get_unread_messages\": {\n      \"type\": \"Http\",\n      \"runAfter\": {},\n      \"inputs\": {\n        \"method\": \"GET\",\n        \"uri\": \"https://graph.microsoft.com/v1.0/users/__SVC_MAILBOX__/mailFolders/Inbox/messages?$filter=isRead eq false&$select=id,from,subject&$top=25\",\n        \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://graph.microsoft.com\" }\n      }\n    },\n    \"For_each_message\": {\n      \"type\": \"Foreach\",\n      \"foreach\": \"@body('Get_unread_messages')?['value']\",\n      \"runAfter\": { \"Get_unread_messages\": [\"Succeeded\"] },\n      \"runtimeConfiguration\": { \"concurrency\": { \"repetitions\": 1 } },\n      \"actions\": {\n        \"Set_nowStamp\": {\n          \"type\": \"Compose\",\n          \"runAfter\": {},\n          \"inputs\": \"@utcNow()\"\n        },\n        \"Set_senderEmail\": {\n          \"type\": \"Compose\",\n          \"runAfter\": { \"Set_nowStamp\": [\"Succeeded\"] },\n          \"inputs\": \"@toLower(coalesce(items('For_each_message')?['from']?['emailAddress']?['address'], ''))\"\n        },\n        \"Set_senderDomain\": {\n          \"type\": \"Compose\",\n          \"runAfter\": { \"Set_senderEmail\": [\"Succeeded\"] },\n          \"inputs\": \"@if(contains(outputs('Set_senderEmail'), '@'), last(split(outputs('Set_senderEmail'), '@')), '')\"\n        },\n        \"Set_hourBucket\": {\n          \"type\": \"Compose\",\n          \"runAfter\": { \"Set_senderDomain\": [\"Succeeded\"] },\n          \"inputs\": \"@formatDateTime(outputs('Set_nowStamp'), 'yyyyMMddHH')\"\n        },\n        \"Guards_antiloop\": {\n          \"type\": \"If\",\n          \"runAfter\": { \"Set_hourBucket\": [\"Succeeded\"] },\n          \"expression\": {\n            \"and\": [\n              { \"not\": { \"equals\": [\"@outputs('Set_senderDomain')\", \"\"] } },\n              { \"not\": { \"contains\": [\"@outputs('Set_senderEmail')\", \"mailer-daemon\"] } },\n              { \"not\": { \"contains\": [\"@outputs('Set_senderEmail')\", \"postmaster\"] } },\n              { \"not\": { \"contains\": [\"@outputs('Set_senderEmail')\", \"no-reply\"] } },\n              { \"not\": { \"contains\": [\"@outputs('Set_senderEmail')\", \"noreply\"] } },\n              { \"not\": { \"equals\": [\"@outputs('Set_senderDomain')\", \"__SELF_DOMAIN__\"] } }\n            ]\n          },\n          \"actions\": {\n            \"Get_registry\": {\n              \"type\": \"Http\",\n              \"runAfter\": {},\n              \"inputs\": {\n                \"method\": \"GET\",\n                \"uri\": \"https://__STORAGE__.table.core.windows.net/NotifyLog()?$filter=RowKey eq '@{outputs('Set_senderDomain')}'\",\n                \"headers\": { \"Accept\": \"application/json;odata=nometadata\", \"x-ms-version\": \"2019-02-02\" },\n                \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://storage.azure.com\" }\n              }\n            },\n            \"Query_denylist\": {\n              \"type\": \"Http\",\n              \"runAfter\": { \"Get_registry\": [\"Succeeded\"] },\n              \"inputs\": {\n                \"method\": \"GET\",\n                \"uri\": \"https://__STORAGE__.table.core.windows.net/Denylist()?$filter=RowKey eq '@{outputs('Set_senderDomain')}'\",\n                \"headers\": { \"Accept\": \"application/json;odata=nometadata\", \"x-ms-version\": \"2019-02-02\" },\n                \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://storage.azure.com\" }\n              }\n            },\n            \"Get_counter\": {\n              \"type\": \"Http\",\n              \"runAfter\": { \"Query_denylist\": [\"Succeeded\"] },\n              \"inputs\": {\n                \"method\": \"GET\",\n                \"uri\": \"https://__STORAGE__.table.core.windows.net/Counters()?$filter=RowKey eq '@{outputs('Set_hourBucket')}'\",\n                \"headers\": { \"Accept\": \"application/json;odata=nometadata\", \"x-ms-version\": \"2019-02-02\" },\n                \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://storage.azure.com\" }\n              }\n            },\n            \"Set_prevFirstSeen\": {\n              \"type\": \"Compose\",\n              \"runAfter\": { \"Get_counter\": [\"Succeeded\"] },\n              \"inputs\": \"@coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['FirstSeenUtc'], outputs('Set_nowStamp'))\"\n            },\n            \"Set_prevCount\": {\n              \"type\": \"Compose\",\n              \"runAfter\": { \"Set_prevFirstSeen\": [\"Succeeded\"] },\n              \"inputs\": \"@int(coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['DetectionCount'], 0))\"\n            },\n            \"Set_prevFirstNotified\": {\n              \"type\": \"Compose\",\n              \"runAfter\": { \"Set_prevCount\": [\"Succeeded\"] },\n              \"inputs\": \"@coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['FirstNotifiedUtc'], '')\"\n            },\n            \"Set_prevLastNotified\": {\n              \"type\": \"Compose\",\n              \"runAfter\": { \"Set_prevFirstNotified\": [\"Succeeded\"] },\n              \"inputs\": \"@coalesce(first(coalesce(body('Get_registry')?['value'], json('[]')))?['LastNotifiedUtc'], '')\"\n            },\n            \"Set_hourCount\": {\n              \"type\": \"Compose\",\n              \"runAfter\": { \"Set_prevLastNotified\": [\"Succeeded\"] },\n              \"inputs\": \"@int(coalesce(first(coalesce(body('Get_counter')?['value'], json('[]')))?['Count'], 0))\"\n            },\n            \"Set_shouldNotify\": {\n              \"type\": \"Compose\",\n              \"runAfter\": { \"Set_hourCount\": [\"Succeeded\"] },\n              \"inputs\": \"@and(equals(length(coalesce(body('Query_denylist')?['value'], json('[]'))), 0), or(empty(outputs('Set_prevLastNotified')), less(outputs('Set_prevLastNotified'), addHours(outputs('Set_nowStamp'), -24))), less(outputs('Set_hourCount'), __HOURLY_CAP__))\"\n            },\n            \"If_shouldNotify\": {\n              \"type\": \"If\",\n              \"runAfter\": { \"Set_shouldNotify\": [\"Succeeded\"] },\n              \"expression\": { \"and\": [ { \"equals\": [\"@outputs('Set_shouldNotify')\", true] } ] },\n              \"actions\": {\n                \"Send_notification\": {\n                  \"type\": \"Http\",\n                  \"runAfter\": {},\n                  \"inputs\": {\n                    \"method\": \"POST\",\n                    \"uri\": \"https://graph.microsoft.com/v1.0/users/__SEND_MAILBOX__/sendMail\",\n                    \"headers\": { \"Content-Type\": \"application/json\" },\n                    \"body\": {\n                      \"message\": {\n                        \"subject\": \"Votre message n'a pas pu etre authentifie (SPF/DKIM)\",\n                        \"body\": {\n                          \"contentType\": \"HTML\",\n                          \"content\": \"<p>Bonjour,</p><p>Nous avons bien recu votre message. Nos controles de securite indiquent que votre domaine d'envoi n'a pas passe les verifications d'authentification SPF et/ou DKIM. Votre message a bien ete remis, mais cette configuration expose vos echanges a l'usurpation d'identite.</p><p>Nous vous recommandons de verifier vos enregistrements SPF, DKIM et DMARC aupres de votre prestataire de messagerie.</p><p>Bien cordialement,<br/>L'equipe securite</p>\"\n                        },\n                        \"toRecipients\": [ { \"emailAddress\": { \"address\": \"@{outputs('Set_senderEmail')}\" } } ]\n                      },\n                      \"saveToSentItems\": true\n                    },\n                    \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://graph.microsoft.com\" }\n                  }\n                },\n                \"Increment_counter\": {\n                  \"type\": \"Http\",\n                  \"runAfter\": { \"Send_notification\": [\"Succeeded\"] },\n                  \"inputs\": {\n                    \"method\": \"PUT\",\n                    \"uri\": \"https://__STORAGE__.table.core.windows.net/Counters(PartitionKey='hour',RowKey='@{outputs('Set_hourBucket')}')\",\n                    \"headers\": { \"Accept\": \"application/json;odata=nometadata\", \"Content-Type\": \"application/json\", \"x-ms-version\": \"2019-02-02\" },\n                    \"body\": {\n                      \"PartitionKey\": \"hour\",\n                      \"RowKey\": \"@{outputs('Set_hourBucket')}\",\n                      \"Count\": \"@add(outputs('Set_hourCount'), 1)\"\n                    },\n                    \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://storage.azure.com\" }\n                  }\n                }\n              },\n              \"else\": { \"actions\": {} }\n            },\n            \"Upsert_registry\": {\n              \"type\": \"Http\",\n              \"runAfter\": { \"If_shouldNotify\": [\"Succeeded\", \"Skipped\"] },\n              \"inputs\": {\n                \"method\": \"PUT\",\n                \"uri\": \"https://__STORAGE__.table.core.windows.net/NotifyLog(PartitionKey='domain',RowKey='@{outputs('Set_senderDomain')}')\",\n                \"headers\": { \"Accept\": \"application/json;odata=nometadata\", \"Content-Type\": \"application/json\", \"x-ms-version\": \"2019-02-02\" },\n                \"body\": {\n                  \"PartitionKey\": \"domain\",\n                  \"RowKey\": \"@{outputs('Set_senderDomain')}\",\n                  \"FirstSeenUtc\": \"@{outputs('Set_prevFirstSeen')}\",\n                  \"LastSeenUtc\": \"@{outputs('Set_nowStamp')}\",\n                  \"DetectionCount\": \"@add(outputs('Set_prevCount'), 1)\",\n                  \"FirstNotifiedUtc\": \"@{if(and(outputs('Set_shouldNotify'), empty(outputs('Set_prevFirstNotified'))), outputs('Set_nowStamp'), outputs('Set_prevFirstNotified'))}\",\n                  \"LastNotifiedUtc\": \"@{if(outputs('Set_shouldNotify'), outputs('Set_nowStamp'), outputs('Set_prevLastNotified'))}\"\n                },\n                \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://storage.azure.com\" }\n              }\n            }\n          },\n          \"else\": { \"actions\": {} }\n        },\n        \"Mark_read\": {\n          \"type\": \"Http\",\n          \"runAfter\": { \"Guards_antiloop\": [\"Succeeded\", \"Failed\", \"Skipped\"] },\n          \"inputs\": {\n            \"method\": \"PATCH\",\n            \"uri\": \"https://graph.microsoft.com/v1.0/users/__SVC_MAILBOX__/messages/@{items('For_each_message')?['id']}\",\n            \"headers\": { \"Content-Type\": \"application/json\" },\n            \"body\": { \"isRead\": true },\n            \"authentication\": { \"type\": \"ManagedServiceIdentity\", \"audience\": \"https://graph.microsoft.com\" }\n          }\n        }\n      }\n    }\n  }\n}\n",
+    "defInjected": "[replace(replace(replace(replace(replace(variables('defText'), '__SVC_MAILBOX__', parameters('svcMailbox')), '__SEND_MAILBOX__', parameters('sendMailbox')), '__STORAGE__', variables('storageName')), '__SELF_DOMAIN__', parameters('selfDomain')), '__HOURLY_CAP__', string(parameters('hourlyCap')))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-01-01",
+      "name": "[variables('storageName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": true
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/tableServices",
+      "apiVersion": "2023-01-01",
+      "name": "[format('{0}/{1}', variables('storageName'), 'default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/tableServices/tables",
+      "apiVersion": "2023-01-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageName'), 'default', 'Allowlist')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/tableServices', variables('storageName'), 'default')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/tableServices/tables",
+      "apiVersion": "2023-01-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageName'), 'default', 'NotifyLog')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/tableServices', variables('storageName'), 'default')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/tableServices/tables",
+      "apiVersion": "2023-01-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageName'), 'default', 'Denylist')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/tableServices', variables('storageName'), 'default')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/tableServices/tables",
+      "apiVersion": "2023-01-01",
+      "name": "[format('{0}/{1}/{2}', variables('storageName'), 'default', 'Counters')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/tableServices', variables('storageName'), 'default')]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[variables('lawName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 90
+      }
+    },
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[variables('logicAppName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": "[json(variables('defInjected'))]",
+        "parameters": {}
+      }
+    },
+    {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.Logic/workflows', variables('logicAppName'))]",
+      "name": "to-law",
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', variables('lawName'))]",
+        "logs": [
+          {
+            "categoryGroup": "allLogs",
+            "enabled": true
+          }
+        ],
+        "metrics": [
+          {
+            "category": "AllMetrics",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', variables('lawName'))]",
+        "[resourceId('Microsoft.Logic/workflows', variables('logicAppName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.Storage/storageAccounts', variables('storageName'))]",
+      "name": "[guid(resourceId('Microsoft.Storage/storageAccounts', variables('storageName')), resourceId('Microsoft.Logic/workflows', variables('logicAppName')), variables('tableDataContributorRoleId'))]",
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('tableDataContributorRoleId'))]",
+        "principalId": "[reference(resourceId('Microsoft.Logic/workflows', variables('logicAppName')), '2019-05-01', 'full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Logic/workflows', variables('logicAppName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "logicAppPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', variables('logicAppName')), '2019-05-01', 'full').identity.principalId]"
+    },
+    "logicAppName": {
+      "type": "string",
+      "value": "[variables('logicAppName')]"
+    },
+    "storageAccount": {
+      "type": "string",
+      "value": "[variables('storageName')]"
+    }
+  }
+}

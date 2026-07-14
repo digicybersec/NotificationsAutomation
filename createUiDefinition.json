@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/0.1.2-preview/CreateUIDefinition.MultiVm.json#",
+  "handler": "Microsoft.Azure.CreateUIDef",
+  "version": "0.1.2-preview",
+  "parameters": {
+    "config": { "isWizard": false },
+    "basics": [
+      {
+        "name": "prefix",
+        "type": "Microsoft.Common.TextBox",
+        "label": "Préfixe des ressources",
+        "defaultValue": "authfail",
+        "toolTip": "Préfixe utilisé pour nommer le Logic App, le storage, etc.",
+        "constraints": { "required": true, "regex": "^[a-z][a-z0-9]{2,15}$", "validationMessage": "3 à 16 caractères, minuscules/chiffres, commence par une lettre." }
+      },
+      {
+        "name": "svcMailbox",
+        "type": "Microsoft.Common.TextBox",
+        "label": "Boîte de service (surveillée)",
+        "toolTip": "Boîte qui reçoit la copie BCC de la transport rule (ex: svc-authfail@contoso.com).",
+        "constraints": { "required": true, "regex": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", "validationMessage": "Adresse email valide requise." }
+      },
+      {
+        "name": "sendMailbox",
+        "type": "Microsoft.Common.TextBox",
+        "label": "Boîte d'envoi des notifications",
+        "toolTip": "Souvent identique à la boîte de service.",
+        "constraints": { "required": true, "regex": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", "validationMessage": "Adresse email valide requise." }
+      },
+      {
+        "name": "selfDomain",
+        "type": "Microsoft.Common.TextBox",
+        "label": "Domaine interne (anti-boucle)",
+        "toolTip": "Domaine de vos boîtes internes, pour couper les boucles (ex: contoso.com).",
+        "constraints": { "required": true, "regex": "^[^@\\s]+\\.[^@\\s]+$", "validationMessage": "Domaine valide requis (ex: contoso.com)." }
+      },
+      {
+        "name": "hourlyCap",
+        "type": "Microsoft.Common.Slider",
+        "label": "Plafond notifications / heure (coupe-circuit)",
+        "min": 1,
+        "max": 500,
+        "defaultValue": 50,
+        "showStepMarkers": false,
+        "toolTip": "Anti-backscatter : au-delà, on enregistre mais on n'envoie plus."
+      }
+    ],
+    "steps": [],
+    "outputs": {
+      "prefix": "[basics('prefix')]",
+      "svcMailbox": "[basics('svcMailbox')]",
+      "sendMailbox": "[basics('sendMailbox')]",
+      "selfDomain": "[basics('selfDomain')]",
+      "hourlyCap": "[basics('hourlyCap')]",
+      "location": "[location()]"
+    }
+  }
+}
