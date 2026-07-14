@@ -1,14 +1,17 @@
-name: Deploy AuthFail Notification (multi-client OIDC)
+name: Deploy AuthFail Notification (turnkey multi-client)
 
-# Déploiement paramétré par client. Aucune valeur en dur : tout est demandé au run
-# (workflow_dispatch) et les identifiants Azure viennent du GitHub Environment du client.
-# ARM + Graph = sans secret (OIDC). Exchange = optionnel (certificat app-only requis).
+# Déploiement TURNKEY paramétré par client : un seul run fait tout, de zéro à fonctionnel.
+#   provision -> boîtes + groupe + infra + Graph + Exchange (Application Access Policy + rule)
+#   validate  -> poll le Logic App jusqu'à ce que l'accès boîte passe (propagation OK)
+#
+# Rien en dur : tout est demandé au run. Identifiants Azure = GitHub Environment du client.
+# ARM + Graph = sans secret (OIDC). Boîtes + Exchange = certificat EXO app-only requis.
 
 on:
   workflow_dispatch:
     inputs:
       client:
-        description: "Client = nom du GitHub Environment (porte AZURE_CLIENT_ID / TENANT / SUBSCRIPTION)"
+        description: "Client = nom du GitHub Environment (AZURE_* + EXO_*)"
         required: true
       resourceGroup:
         description: "Resource group cible"
@@ -35,24 +38,32 @@ on:
         description: "Groupe mail-enabled pour l'Application Access Policy (ex: authfail-scope@client.com)"
         required: true
       socMailbox:
-        description: "Boîte SOC pour l'incident report (optionnel, vide = désactivé)"
+        description: "Boîte SOC pour l'incident report (optionnel)"
         required: false
         default: ""
       hourlyCap:
-        description: "Plafond notifications / heure (coupe-circuit)"
+        description: "Plafond notifications / heure"
         required: false
         default: "50"
-      runExchange:
-        description: "Configurer aussi Exchange (Application Access Policy + transport rule). Nécessite un certificat EXO."
+      createMailboxes:
+        description: "Créer les boîtes (partagées) automatiquement — nécessite le certificat EXO"
         type: boolean
-        default: false
+        default: true
+      configureExchange:
+        description: "Configurer Exchange (groupe + Application Access Policy + transport rule) — nécessite le certificat EXO"
+        type: boolean
+        default: true
+      runSmokeTest:
+        description: "Valider en fin de run que le Logic App accède bien à la boîte (attend la propagation)"
+        type: boolean
+        default: true
 
 permissions:
-  id-token: write   # OIDC — pas de secret Azure
+  id-token: write   # OIDC — pas de secret Azure/Graph
   contents: read
 
 jobs:
-  deploy:
+  provision:
     runs-on: ubuntu-latest
     environment: ${{ inputs.client }}
     steps:
@@ -64,6 +75,18 @@ jobs:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: (option) Créer les boîtes
+        if: ${{ inputs.createMailboxes }}
+        shell: pwsh
+        env:
+          EXO_APP_ID:   ${{ vars.EXO_APP_ID }}
+          EXO_ORG:      ${{ vars.EXO_ORG }}
+          EXO_CERT_B64: ${{ secrets.EXO_CERT_B64 }}
+        run: |
+          ./provision-mailboxes.ps1 `
+            -SvcMailbox "${{ inputs.svcMailbox }}" `
+            -SendMailbox "${{ inputs.sendMailbox }}"
 
       - name: Créer le resource group
         run: az group create -n "${{ inputs.resourceGroup }}" -l "${{ inputs.location }}"
@@ -90,7 +113,6 @@ jobs:
         run: |
           PRINCIPAL="${{ steps.infra.outputs.principalId }}"
           GRAPH=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query id -o tsv)
-          # Mail.Read, Mail.ReadWrite, Mail.Send
           for ROLE in 810c84a8-4a9e-49e6-bf7d-12d183f40d01 e2a3a72e-5f79-4c64-b1b1-878b674786c9 b633e1c5-b582-4048-a93e-9f11b44c7e96; do
             az rest --method POST \
               --url "https://graph.microsoft.com/v1.0/servicePrincipals/$PRINCIPAL/appRoleAssignments" \
@@ -99,8 +121,8 @@ jobs:
               || echo "Role $ROLE déjà assigné (ok)"
           done
 
-      - name: (option) Configurer Exchange — Application Access Policy + transport rule
-        if: ${{ inputs.runExchange }}
+      - name: (option) Configurer Exchange — groupe + Application Access Policy + transport rule
+        if: ${{ inputs.configureExchange }}
         shell: pwsh
         env:
           EXO_APP_ID:   ${{ vars.EXO_APP_ID }}
@@ -113,11 +135,44 @@ jobs:
             -ScopeGroupMail "${{ inputs.scopeGroupMail }}" `
             -SocMailbox "${{ inputs.socMailbox }}"
 
-      - name: Récap
+      - name: Récap provisioning
         run: |
           echo "Client        : ${{ inputs.client }}"
           echo "RG            : ${{ inputs.resourceGroup }} (${{ inputs.location }})"
+          echo "Logic App     : ${{ inputs.prefix }}-notify-logic"
           echo "MI principalId: ${{ steps.infra.outputs.principalId }}"
           echo "MI appId      : ${{ steps.miapp.outputs.appId }}"
-          echo "Exchange      : ${{ inputs.runExchange }}"
-          echo "⏳ Application Access Policy : propagation jusqu'à ~30 min."
+
+  validate:
+    needs: provision
+    if: ${{ inputs.runSmokeTest }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.client }}
+    steps:
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Smoke test — attendre que le Logic App accède à la boîte
+        run: |
+          SUB=$(az account show --query id -o tsv)
+          RG="${{ inputs.resourceGroup }}"
+          NAME="${{ inputs.prefix }}-notify-logic"
+          echo "Poll des runs du Logic App (propagation de l'Application Access Policy peut prendre ~30-60 min)..."
+          for i in $(seq 1 20); do
+            STATUS=$(az rest --method get \
+              --url "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Logic/workflows/$NAME/runs?api-version=2016-06-01&\$top=1" \
+              --query "value[0].properties.status" -o tsv 2>/dev/null || echo "None")
+            echo "  tentative $i/20 : dernier run = $STATUS"
+            if [ "$STATUS" = "Succeeded" ]; then
+              echo "✅ Le Logic App accède à la boîte — propagation terminée, chaîne fonctionnelle."
+              exit 0
+            fi
+            sleep 180
+          done
+          echo "⚠️ Non validé après ~60 min. La propagation de l'Application Access Policy peut dépasser ce délai."
+          echo "   Relance le job 'validate' plus tard (Re-run jobs), ou vérifie un run frais du Logic App."
+          exit 1

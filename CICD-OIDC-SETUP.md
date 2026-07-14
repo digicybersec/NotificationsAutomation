@@ -52,9 +52,11 @@ az ad app permission add --id <APP_ID> \
 az ad app permission admin-consent --id <APP_ID>
 ```
 
-## 4. (Optionnel) Exchange app-only — pour le job `runExchange`
+## 4. Exchange app-only (certificat) — REQUIS pour le mode turnkey
 
-Nécessaire seulement si tu veux automatiser l'Application Access Policy + la transport rule.
+Nécessaire dès que tu automatises la **création des boîtes** (`createMailboxes`) ou la
+configuration Exchange (`configureExchange`) — c'est-à-dire le déploiement turnkey complet.
+Facultatif seulement si tu pré-crées les boîtes et configures Exchange à la main.
 1. Sur l'app registration (ou une app dédiée) : ajouter la permission **Office 365 Exchange
    Online → Exchange.ManageAsApp** (Application) + **admin-consent**.
 2. Attribuer le rôle Entra **Exchange Administrator** au SP.
@@ -86,29 +88,46 @@ du federated credential (ex. `acme`). Ajoute :
 
 ## 6. Lancer un déploiement
 
-**Actions → Deploy AuthFail Notification → Run workflow** → remplis le formulaire :
+**Actions → Deploy AuthFail Notification (turnkey) → Run workflow** → remplis le formulaire :
 `client` (= nom de l'environment), `resourceGroup`, `location`, `prefix`, `svcMailbox`,
-`sendMailbox`, `selfDomain`, `scopeGroupMail`, `socMailbox` (option), `hourlyCap`,
-`runExchange` (coche si tu as fait §4).
+`sendMailbox`, `selfDomain`, `scopeGroupMail`, `socMailbox` (option), `hourlyCap`, plus les
+**3 interrupteurs turnkey** : `createMailboxes`, `configureExchange`, `runSmokeTest` (tous
+cochés = déploiement complet de zéro à fonctionnel).
 
-Le pipeline :
+Le pipeline enchaîne, en **2 jobs** :
+
+**Job `provision`**
 1. login OIDC vers le tenant du client,
-2. déploie l'infra (Bicep),
-3. assigne Mail.Read / Mail.ReadWrite / Mail.Send à la MI,
-4. *(si coché)* crée le groupe de scope + Application Access Policy + transport rule,
-5. affiche le récap (principalId, appId).
+2. *(si `createMailboxes`)* crée les boîtes partagées (`provision-mailboxes.ps1`),
+3. déploie l'infra (Bicep),
+4. assigne Mail.Read / Mail.ReadWrite / Mail.Send à la MI,
+5. *(si `configureExchange`)* groupe de scope + Application Access Policy + transport rule,
+6. récap (principalId, appId).
 
-> ⏳ L'Application Access Policy met jusqu'à ~30 min à se propager avant que le Logic App
-> puisse lire la boîte.
+**Job `validate`** *(si `runSmokeTest`)*
+7. poll les runs du Logic App jusqu'à ce que l'accès boîte passe au vert (**attend la
+   propagation** de l'Application Access Policy, ~30-60 min) → prouve que la chaîne fonctionne.
+
+> ⏳ Le job `validate` peut tourner ~30-60 min (propagation). Si timeout, relance-le seul
+> (*Re-run jobs*) plus tard — l'infra, elle, est déjà en place.
+>
+> 💡 Modes partiels : pour un client qui pré-crée ses boîtes / configure Exchange à la main,
+> décoche `createMailboxes` et/ou `configureExchange` (le certificat EXO devient inutile).
 
 ---
 
-## Pré-requis boîtes (côté client, hors pipeline)
+## Pré-requis boîtes
 
-À créer avant (ou le pipeline échouera au runtime Graph) :
+En mode turnkey (`createMailboxes = true`), le pipeline **crée les boîtes partagées lui-même**
+(`svcMailbox`, et `sendMailbox` si différente). ⚠️ La création de boîte est une action réelle
+et peu réversible sur le tenant du client — c'est voulu en turnkey, mais garde-le en tête.
+
+Si tu préfères les gérer à la main (`createMailboxes = false`), crée avant :
 - **boîte de service partagée** (`svcMailbox`) qui reçoit la copie BCC,
-- **boîte d'envoi** (`sendMailbox`, souvent = svc) avec SPF/DKIM OK,
-- idéalement un **sous-domaine d'envoi dédié** pour isoler la réputation.
+- **boîte d'envoi** (`sendMailbox`, souvent = svc) avec SPF/DKIM OK.
+
+Dans tous les cas, recommandé : un **sous-domaine d'envoi dédié** (ex. `notify.client.com`)
+avec son propre SPF/DKIM/DMARC pour **isoler la réputation** (rappel : modèle B = backscatter).
 
 ## Pourquoi workflow_dispatch et pas « push auto »
 
