@@ -41,15 +41,27 @@ az role assignment create --assignee <APP_ID> --role Owner \
   --scope /subscriptions/<SUB_ID>
 ```
 
-## 3. Permissions Graph (app-only, pour assigner Mail.* à la MI)
+## 3. Permissions Graph (app-only) — DEUX rôles requis
 
-Le SP doit pouvoir **écrire des app role assignments** :
+Le SP déployeur a besoin de **deux** permissions applicatives sur Microsoft Graph :
+- `AppRoleAssignment.ReadWrite.All` (`06b708a9-e830-4db3-a914-8e69da51d44f`) — assigner Mail.* à la MI
+- `Application.Read.All` (`9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30`) — **lire le SP de Graph** pour résoudre son ID (sinon `Insufficient privileges`)
+
+> ⚠️ `az ad app permission add` + `admin-consent` s'est révélé **peu fiable** (la permission
+> n'est pas toujours ajoutée/consentie). Méthode **directe et fiable** — on crée les deux
+> assignations à la main (nécessite Global Admin) :
+
 ```bash
-# AppRoleAssignment.ReadWrite.All (id 06b708a9-e830-4db3-a914-8e69da51d44f) sur Microsoft Graph
-az ad app permission add --id <APP_ID> \
-  --api 00000003-0000-0000-c000-000000000000 \
-  --api-permissions 06b708a9-e830-4db3-a914-8e69da51d44f=Role
-az ad app permission admin-consent --id <APP_ID>
+SP=$(az ad sp show --id <APP_ID> --query id -o tsv)
+GRAPH=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query id -o tsv)
+for ROLE in 06b708a9-e830-4db3-a914-8e69da51d44f 9a5d68dd-52b0-4cc2-bd40-abcf44ac3a30; do
+  az rest --method POST \
+    --url "https://graph.microsoft.com/v1.0/servicePrincipals/$SP/appRoleAssignments" \
+    --headers "Content-Type=application/json" \
+    --body "{\"principalId\":\"$SP\",\"resourceId\":\"$GRAPH\",\"appRoleId\":\"$ROLE\"}"
+done
+# Vérif : doit lister les 2 appRoleId
+az rest --method GET --url "https://graph.microsoft.com/v1.0/servicePrincipals/$SP/appRoleAssignments" --query "value[].appRoleId" -o tsv
 ```
 
 ## 4. Exchange app-only (certificat) — REQUIS pour le mode turnkey
