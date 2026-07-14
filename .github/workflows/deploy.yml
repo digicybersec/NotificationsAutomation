@@ -1,0 +1,123 @@
+name: Deploy AuthFail Notification (multi-client OIDC)
+
+# Déploiement paramétré par client. Aucune valeur en dur : tout est demandé au run
+# (workflow_dispatch) et les identifiants Azure viennent du GitHub Environment du client.
+# ARM + Graph = sans secret (OIDC). Exchange = optionnel (certificat app-only requis).
+
+on:
+  workflow_dispatch:
+    inputs:
+      client:
+        description: "Client = nom du GitHub Environment (porte AZURE_CLIENT_ID / TENANT / SUBSCRIPTION)"
+        required: true
+      resourceGroup:
+        description: "Resource group cible"
+        required: true
+        default: "rg-authfail"
+      location:
+        description: "Région Azure"
+        required: true
+        default: "westeurope"
+      prefix:
+        description: "Préfixe des ressources (3-16, minuscules/chiffres)"
+        required: true
+        default: "authfail"
+      svcMailbox:
+        description: "Boîte de service surveillée (ex: svc-authfail@client.com)"
+        required: true
+      sendMailbox:
+        description: "Boîte d'envoi des notifications (souvent = boîte de service)"
+        required: true
+      selfDomain:
+        description: "Domaine interne du client (anti-boucle)"
+        required: true
+      scopeGroupMail:
+        description: "Groupe mail-enabled pour l'Application Access Policy (ex: authfail-scope@client.com)"
+        required: true
+      socMailbox:
+        description: "Boîte SOC pour l'incident report (optionnel, vide = désactivé)"
+        required: false
+        default: ""
+      hourlyCap:
+        description: "Plafond notifications / heure (coupe-circuit)"
+        required: false
+        default: "50"
+      runExchange:
+        description: "Configurer aussi Exchange (Application Access Policy + transport rule). Nécessite un certificat EXO."
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write   # OIDC — pas de secret Azure
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.client }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, sans secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Créer le resource group
+        run: az group create -n "${{ inputs.resourceGroup }}" -l "${{ inputs.location }}"
+
+      - name: Déployer l'infra (Bicep)
+        id: infra
+        run: |
+          PID=$(az deployment group create \
+            -g "${{ inputs.resourceGroup }}" \
+            -f main.bicep \
+            -p prefix="${{ inputs.prefix }}" \
+               svcMailbox="${{ inputs.svcMailbox }}" \
+               sendMailbox="${{ inputs.sendMailbox }}" \
+               selfDomain="${{ inputs.selfDomain }}" \
+               hourlyCap="${{ inputs.hourlyCap }}" \
+            --query "properties.outputs.logicAppPrincipalId.value" -o tsv)
+          echo "principalId=$PID" >> "$GITHUB_OUTPUT"
+
+      - name: AppId de la Managed Identity
+        id: miapp
+        run: echo "appId=$(az ad sp show --id ${{ steps.infra.outputs.principalId }} --query appId -o tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Permissions Graph app-only sur la MI (sans secret)
+        run: |
+          PRINCIPAL="${{ steps.infra.outputs.principalId }}"
+          GRAPH=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query id -o tsv)
+          # Mail.Read, Mail.ReadWrite, Mail.Send
+          for ROLE in 810c84a8-4a9e-49e6-bf7d-12d183f40d01 e2a3a72e-5f79-4c64-b1b1-878b674786c9 b633e1c5-b582-4048-a93e-9f11b44c7e96; do
+            az rest --method POST \
+              --url "https://graph.microsoft.com/v1.0/servicePrincipals/$PRINCIPAL/appRoleAssignments" \
+              --headers "Content-Type=application/json" \
+              --body "{\"principalId\":\"$PRINCIPAL\",\"resourceId\":\"$GRAPH\",\"appRoleId\":\"$ROLE\"}" \
+              || echo "Role $ROLE déjà assigné (ok)"
+          done
+
+      - name: (option) Configurer Exchange — Application Access Policy + transport rule
+        if: ${{ inputs.runExchange }}
+        shell: pwsh
+        env:
+          EXO_APP_ID:   ${{ vars.EXO_APP_ID }}
+          EXO_ORG:      ${{ vars.EXO_ORG }}
+          EXO_CERT_B64: ${{ secrets.EXO_CERT_B64 }}
+          MI_APP_ID:    ${{ steps.miapp.outputs.appId }}
+        run: |
+          ./configure-exchange.ps1 `
+            -SvcMailbox "${{ inputs.svcMailbox }}" `
+            -ScopeGroupMail "${{ inputs.scopeGroupMail }}" `
+            -SocMailbox "${{ inputs.socMailbox }}"
+
+      - name: Récap
+        run: |
+          echo "Client        : ${{ inputs.client }}"
+          echo "RG            : ${{ inputs.resourceGroup }} (${{ inputs.location }})"
+          echo "MI principalId: ${{ steps.infra.outputs.principalId }}"
+          echo "MI appId      : ${{ steps.miapp.outputs.appId }}"
+          echo "Exchange      : ${{ inputs.runExchange }}"
+          echo "⏳ Application Access Policy : propagation jusqu'à ~30 min."
