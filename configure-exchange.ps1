@@ -50,8 +50,15 @@ if (-not (Get-DistributionGroup -Identity $ScopeGroupMail -ErrorAction SilentlyC
   Write-Host "Boîte ajoutée au groupe de scope."
 }
 
-# --- Application Access Policy (idempotent, avec retry sur réplication annuaire) ---
-$policyExists = Invoke-WithRetry { @(Get-ApplicationAccessPolicy | Where-Object { $_.AppId -eq $miAppId }).Count -gt 0 }
+# --- Application Access Policy (idempotent) ---
+# Get-ApplicationAccessPolicy LÈVE une erreur ("object OU=...\* couldn't be found") quand il
+# n'existe AUCUNE policy dans le tenant. On catch → on considère qu'il faut la créer.
+$policyExists = $false
+try {
+  $policyExists = @(Get-ApplicationAccessPolicy -ErrorAction Stop | Where-Object { $_.AppId -eq $miAppId }).Count -gt 0
+} catch {
+  Write-Host "Get-ApplicationAccessPolicy vide/erreur ($($_.Exception.Message)) -> création de la policy."
+}
 if (-not $policyExists) {
   Invoke-WithRetry { New-ApplicationAccessPolicy -AppId $miAppId -PolicyScopeGroupId $ScopeGroupMail -AccessRight RestrictAccess -Description "AuthFail MI mail scope" | Out-Null }
   Write-Host "Application Access Policy créée (propagation ~30 min)."
