@@ -27,6 +27,19 @@ Connect-ExchangeOnline -AppId $env:EXO_APP_ID -Organization $env:EXO_ORG -Certif
 
 $miAppId = $env:MI_APP_ID
 
+# Retry : après création boîte/groupe, la réplication annuaire Exchange peut lagger
+# (Get-ApplicationAccessPolicy renvoie alors "object ...\* couldn't be found").
+function Invoke-WithRetry([scriptblock]$Action, [int]$Max = 8, [int]$DelaySec = 30) {
+  for ($i = 1; $i -le $Max; $i++) {
+    try { return & $Action }
+    catch {
+      Write-Host "  tentative $i/$Max : $($_.Exception.Message)"
+      if ($i -eq $Max) { throw }
+      Start-Sleep $DelaySec
+    }
+  }
+}
+
 # --- Groupe de scope (créer si absent, garantir le membre) ---
 if (-not (Get-DistributionGroup -Identity $ScopeGroupMail -ErrorAction SilentlyContinue)) {
   New-DistributionGroup -Name ($ScopeGroupMail.Split('@')[0]) -Type Security `
@@ -37,10 +50,10 @@ if (-not (Get-DistributionGroup -Identity $ScopeGroupMail -ErrorAction SilentlyC
   Write-Host "Boîte ajoutée au groupe de scope."
 }
 
-# --- Application Access Policy (idempotent) ---
-if (-not (Get-ApplicationAccessPolicy | Where-Object { $_.AppId -eq $miAppId })) {
-  New-ApplicationAccessPolicy -AppId $miAppId -PolicyScopeGroupId $ScopeGroupMail `
-    -AccessRight RestrictAccess -Description "AuthFail MI mail scope" | Out-Null
+# --- Application Access Policy (idempotent, avec retry sur réplication annuaire) ---
+$policyExists = Invoke-WithRetry { @(Get-ApplicationAccessPolicy | Where-Object { $_.AppId -eq $miAppId }).Count -gt 0 }
+if (-not $policyExists) {
+  Invoke-WithRetry { New-ApplicationAccessPolicy -AppId $miAppId -PolicyScopeGroupId $ScopeGroupMail -AccessRight RestrictAccess -Description "AuthFail MI mail scope" | Out-Null }
   Write-Host "Application Access Policy créée (propagation ~30 min)."
 } else {
   Write-Host "Application Access Policy déjà présente."
@@ -66,7 +79,7 @@ if (-not (Get-TransportRule -Identity "SEC-AuthFail-Detect-Trigger" -ErrorAction
     $params.GenerateIncidentReport = $SocMailbox
     $params.IncidentReportContent  = @("Sender", "Recipients", "Subject", "Headers")
   }
-  New-TransportRule @params | Out-Null
+  Invoke-WithRetry { New-TransportRule @params | Out-Null }
   Write-Host "Transport rule créée."
 } else {
   Write-Host "Transport rule déjà présente."
