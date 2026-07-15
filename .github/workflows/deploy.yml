@@ -76,6 +76,11 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Installer ExchangeOnlineManagement (si Exchange)
+        if: ${{ inputs.createMailboxes || inputs.configureExchange }}
+        shell: pwsh
+        run: Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser -AllowClobber
+
       - name: (option) Créer les boîtes
         if: ${{ inputs.createMailboxes }}
         shell: pwsh
