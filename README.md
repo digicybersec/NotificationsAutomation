@@ -6,7 +6,7 @@ détecté, applique un **coupe-circuit horaire** anti-backscatter et une **denyl
 
 ## Déploiement 1 clic
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#blade/Microsoft_Azure_CreateUIDef/CustomDeploymentBlade/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fdigicybersec%2FNotificationsAutomation%2Fmain%2Fazuredeploy.json/uiFormDefinitionUri/https%3A%2F%2Fraw.githubusercontent.com%2Fdigicybersec%2FNotificationsAutomation%2Fmain%2FcreateUiDefinition.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fdigicybersec%2FNotificationsAutomation%2Fmain%2Fazuredeploy.json)
 
 Le bouton déploie **l'infra Azure** : Logic App (Managed Identity), Storage + tables
 (`NotifyLog`, `Denylist`, `Counters`), Log Analytics, RBAC.
