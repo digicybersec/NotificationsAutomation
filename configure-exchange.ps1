@@ -19,7 +19,8 @@ $ErrorActionPreference = "Stop"
 $certBytes = [Convert]::FromBase64String($env:EXO_CERT_B64)
 $certPath  = Join-Path $env:RUNNER_TEMP "exo.pfx"
 [IO.File]::WriteAllBytes($certPath, $certBytes)
-$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, "", 'Exportable,PersistKeySet')
+$certPwd = if ($env:EXO_CERT_PWD) { $env:EXO_CERT_PWD } else { "" }
+$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $certPwd, 'Exportable,PersistKeySet')
 
 Import-Module ExchangeOnlineManagement
 Connect-ExchangeOnline -AppId $env:EXO_APP_ID -Organization $env:EXO_ORG -Certificate $cert -ShowBanner:$false

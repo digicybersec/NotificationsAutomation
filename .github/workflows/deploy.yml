@@ -83,6 +83,7 @@ jobs:
           EXO_APP_ID:   ${{ vars.EXO_APP_ID }}
           EXO_ORG:      ${{ vars.EXO_ORG }}
           EXO_CERT_B64: ${{ secrets.EXO_CERT_B64 }}
+          EXO_CERT_PWD: ${{ secrets.EXO_CERT_PWD }}
         run: |
           ./provision-mailboxes.ps1 `
             -SvcMailbox "${{ inputs.svcMailbox }}" `
@@ -128,6 +129,7 @@ jobs:
           EXO_APP_ID:   ${{ vars.EXO_APP_ID }}
           EXO_ORG:      ${{ vars.EXO_ORG }}
           EXO_CERT_B64: ${{ secrets.EXO_CERT_B64 }}
+          EXO_CERT_PWD: ${{ secrets.EXO_CERT_PWD }}
           MI_APP_ID:    ${{ steps.miapp.outputs.appId }}
         run: |
           ./configure-exchange.ps1 `
