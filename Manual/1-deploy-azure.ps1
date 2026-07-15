@@ -15,12 +15,12 @@ if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-# --- Verifier le template (main.bicep + workflow.json, requis ensemble) ---
-$bicep    = Join-Path $PSScriptRoot "..\main.bicep"
-$workflow = Join-Path $PSScriptRoot "..\workflow.json"
+# --- Verifier le template (main.bicep + workflow.json, dans ce meme dossier) ---
+$bicep    = Join-Path $PSScriptRoot "main.bicep"
+$workflow = Join-Path $PSScriptRoot "workflow.json"
 if (-not (Test-Path $bicep) -or -not (Test-Path $workflow)) {
-  Write-Host "main.bicep et/ou workflow.json introuvable(s) a la racine du repo." -ForegroundColor Red
-  Write-Host "Assure-toi d'avoir clone TOUT le repo (pas seulement le dossier Manual)." -ForegroundColor Yellow
+  Write-Host "main.bicep et/ou workflow.json manquant(s) dans le dossier Manual." -ForegroundColor Red
+  Write-Host "Ces 2 fichiers doivent etre a cote des scripts." -ForegroundColor Yellow
   exit 1
 }
 

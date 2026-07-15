@@ -9,7 +9,7 @@ Azure et Exchange se font par login interactif (fenêtre de navigateur).
 - **Windows PowerShell**
 - **Azure CLI** : `winget install -e --id Microsoft.AzureCLI` (puis rouvrir PowerShell)
 - Être **Global Administrator** du tenant Microsoft 365 **et** **Owner** d'une souscription Azure
-- Avoir **cloné tout le dépôt** (les scripts utilisent `main.bicep` **et** `workflow.json` à la racine — ce dernier est inliné dans le Bicep à la compilation)
+- Le dossier `Manual/` est **autonome** : il contient déjà `main.bicep` et `workflow.json` (ce dernier est inliné dans le Bicep à la compilation). Tu peux donc n'utiliser que ce dossier.
 - Le module Exchange s'installe tout seul si besoin
 
 ## Étape 1 — Ressources Azure
