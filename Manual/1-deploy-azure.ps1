@@ -15,10 +15,12 @@ if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
   exit 1
 }
 
-# --- Verifier le template ---
-$bicep = Join-Path $PSScriptRoot "..\main.bicep"
-if (-not (Test-Path $bicep)) {
-  Write-Host "main.bicep introuvable. Assure-toi d'avoir clone TOUT le repo (pas seulement le dossier Manual)." -ForegroundColor Red
+# --- Verifier le template (main.bicep + workflow.json, requis ensemble) ---
+$bicep    = Join-Path $PSScriptRoot "..\main.bicep"
+$workflow = Join-Path $PSScriptRoot "..\workflow.json"
+if (-not (Test-Path $bicep) -or -not (Test-Path $workflow)) {
+  Write-Host "main.bicep et/ou workflow.json introuvable(s) a la racine du repo." -ForegroundColor Red
+  Write-Host "Assure-toi d'avoir clone TOUT le repo (pas seulement le dossier Manual)." -ForegroundColor Yellow
   exit 1
 }
 
